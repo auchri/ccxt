@@ -150,7 +150,7 @@ class bitpandafusion(Exchange, ImplicitAPI):
                     },
                     'fetchMyTrades': {
                         'marginMode': False,
-                        'limit': 100,
+                        'limit': 1000,
                         'daysBack': None,
                         'untilDays': None,
                         'symbolRequired': False,
@@ -654,6 +654,25 @@ class bitpandafusion(Exchange, ImplicitAPI):
         response = await self.privateGetV1AccountOrdersOrderId(self.extend(request, params))
         return self.parse_order(response)
 
+    def add_pagination_cursor_to_result(self, response: dict) -> list:
+        """
+ @ignore
+        adds the pagination cursor to the first result so it is available after parsing
+        :param dict response: exchange response
+        :returns dict[]: response data with pagination metadata
+        """
+        data = self.safe_list(response, 'data', [])
+        meta = self.safe_dict(response, 'meta', {})
+        hasNextPage = self.safe_bool(meta, 'hasNextPage', False)
+        nextCursor = self.safe_string(meta, 'nextCursor')
+        dataLength = len(data)
+        if (hasNextPage is True) and (nextCursor is not None) and (dataLength > 0):
+            first = data[0]
+            first['hasNextPage'] = hasNextPage
+            first['nextCursor'] = nextCursor
+            data[0] = first
+        return data
+
     async def fetch_orders(self, symbol: Str = None, since: Int = None, limit: Int = None, params={}) -> list[Order]:
         """
         fetches information on multiple orders made by the user
@@ -684,7 +703,7 @@ class bitpandafusion(Exchange, ImplicitAPI):
             request['endTime'] = self.parse_to_int(Precise.string_div(self.number_to_string(until), '1000'))
         params = self.omit(params, 'until')
         response = await self.privateGetV1AccountOrders(self.extend(request, params))
-        data = self.safe_list(response, 'data', [])
+        data = self.add_pagination_cursor_to_result(response)
         return self.parse_orders(data, market, since, limit)
 
     async def fetch_open_orders(self, symbol: Str = None, since: Int = None, limit: Int = None, params={}) -> list[Order]:
@@ -879,9 +898,15 @@ class bitpandafusion(Exchange, ImplicitAPI):
         :param int [params.until]: timestamp in ms of the latest trade
         :param str [params.cursor]: cursor from the previous page
         :param str [params.orderId]: filter by exchange order id
+        :param boolean [params.paginate]: default False, when True will automatically paginate by calling self endpoint multiple times. See in the docs all the [available parameters](https://github.com/ccxt/ccxt/wiki/Manual#pagination-params)
+        :param int [params.paginationCalls]: the maximum number of requests while automatically paginating, default 10
         :returns dict[]: a list of trade structures
         """
         await self.load_markets()
+        paginate = False
+        paginate, params = self.handle_option_and_params(params, 'fetchMyTrades', 'paginate')
+        if paginate:
+            return await self.fetch_paginated_call_cursor('fetchMyTrades', symbol, since, limit, params, 'nextCursor', 'cursor', None, 1000)
         request = {}
         market = None
         if symbol is not None:
@@ -890,13 +915,13 @@ class bitpandafusion(Exchange, ImplicitAPI):
         if since is not None:
             request['startTime'] = self.parse_to_int(Precise.string_div(self.number_to_string(since), '1000'))
         if limit is not None:
-            request['limit'] = limit
+            request['limit'] = min(limit, 1000)
         until = self.safe_integer(params, 'until')
         if until is not None:
             request['endTime'] = self.parse_to_int(Precise.string_div(self.number_to_string(until), '1000'))
         params = self.omit(params, 'until')
         response = await self.privateGetV1AccountTrades(self.extend(request, params))
-        data = self.safe_list(response, 'data', [])
+        data = self.add_pagination_cursor_to_result(response)
         return self.parse_trades(data, market, since, limit)
 
     def sign(self, path: str, api: str = 'public', method: str = 'GET', params={}, headers: dict = None, body: Str = None):
